@@ -154,7 +154,7 @@ client.on(Events.InteractionCreate, async interaction => {
 // 4) Moteur de combat interactif
 async function launchCombat(session, channel) {
   const mapCls = { Fighter, Paladin, Monk, Berzerker, Assassin, Ranger, Wizard };
-  // Instanciation
+  // Instanciation de tous les combattants
   session.combatants = new Map();
   for (const [id, p] of session.players.entries()) {
     const name = id.startsWith('BOT_')
@@ -165,49 +165,50 @@ async function launchCombat(session, channel) {
     session.combatants.set(id, inst);
   }
 
-  // Boucle de tours
   while (session.turn <= session.maxTurns) {
     // 🔄 Annonce du tour
     await channel.send(`🔄 **Tour ${session.turn}/${session.maxTurns}**`);
 
-    // A) Tour du joueur humain
-    // (on suppose ici un seul humain ; si plusieurs, tu peux itérer)
-    const humanId = session.order[0];
-    const human   = session.combatants.get(humanId);
-    if (human && human.alive) {
-      // 1️⃣ Choix d'action
+    //
+    // — A) Tours des joueurs humains —
+    //
+    for (const humanId of session.order) {
+      const human = session.combatants.get(humanId);
+      if (!human || !human.alive) continue;
+
+      // 1️⃣ Choix d’action
       const atkBtn = new ButtonBuilder()
-        .setCustomId('act_atk')
+        .setCustomId(`act_atk_${humanId}`)
         .setLabel('Attaque normale')
         .setStyle(ButtonStyle.Primary);
       const spcBtn = new ButtonBuilder()
-        .setCustomId('act_spc')
+        .setCustomId(`act_spc_${humanId}`)
         .setLabel('Attaque spéciale')
         .setStyle(ButtonStyle.Danger);
       const rowAct = new ActionRowBuilder().addComponents(atkBtn, spcBtn);
 
-      // On envoie en DM
       const user = await client.users.fetch(humanId);
       const dm   = await user.send({
         content: `Tour ${session.turn} : quelle action choisissez-vous ?`,
         components: [rowAct]
       });
 
-      // On attend la réponse action
       const choice = await dm.awaitMessageComponent({
-        filter: i => i.user.id === humanId && (i.customId === 'act_atk' || i.customId === 'act_spc'),
+        filter: i => i.user.id === humanId && (
+          i.customId === `act_atk_${humanId}` ||
+          i.customId === `act_spc_${humanId}`
+        ),
         time: 60000
       }).catch(() => null);
 
       let isSpecial = false;
       if (choice) {
-        isSpecial = choice.customId === 'act_spc';
+        isSpecial = choice.customId === `act_spc_${humanId}`;
         await choice.update({
           content: `Vous avez choisi **${isSpecial ? 'attaque spéciale' : 'attaque normale'}**.`,
           components: []
         });
       } else {
-        // défaut attaque normale
         await dm.channel.send('⌛ Temps écoulé, attaque normale par défaut.');
       }
 
@@ -218,15 +219,15 @@ async function launchCombat(session, channel) {
           label: `${c.name} (${c.hp} HP)`,
           value: id
         }));
+
       const menu = new StringSelectMenuBuilder()
-        .setCustomId('target_sel')
+        .setCustomId(`target_sel_${humanId}`)
         .setPlaceholder('Choisissez votre cible')
         .addOptions(options);
-      const rowTgt = new ActionRowBuilder().addComponents(menu);
 
-      const sel = await dm.channel.send({ components: [rowTgt] });
-      const selected = await sel.awaitMessageComponent({
-        filter: i => i.user.id === humanId && i.customId === 'target_sel',
+      const selMsg = await dm.channel.send({ components: [ new ActionRowBuilder().addComponents(menu) ] });
+      const selected = await selMsg.awaitMessageComponent({
+        filter: i => i.user.id === humanId && i.customId === `target_sel_${humanId}`,
         time: 60000
       }).catch(() => null);
 
@@ -234,7 +235,8 @@ async function launchCombat(session, channel) {
         const tgtId = selected.values[0];
         const target = session.combatants.get(tgtId);
         if (isSpecial) human.specialAttack(target);
-        else human.attack(target);
+        else            human.attack(target);
+
         await selected.update({
           content: `Vous avez frappé **${target.name}** (HP→${target.hp}).`,
           components: []
@@ -244,17 +246,21 @@ async function launchCombat(session, channel) {
       }
     }
 
-    // B) Tours des bots (tous adversaires vivants)
+    //
+    // — B) Tours des bots —
+    //
     for (const [id, char] of session.combatants.entries()) {
       if (!char.alive || char.ownerId !== null) continue;
       const choices = [...session.combatants.values()].filter(c => c.alive && c !== char);
-      if (!choices.length) break;
+      if (choices.length === 0) break;
       const tgt = choices[Math.floor(Math.random() * choices.length)];
       char.attack(tgt);
       await channel.send(`🤖 **${char.name}** attaque **${tgt.name}** (HP→${tgt.hp})`);
     }
 
-    // C) Annonce des morts
+    //
+    // — C) Annonce des morts —
+    //
     for (const [id, c] of session.combatants.entries()) {
       if (!c.alive && !c._deadAnnounced) {
         c._deadAnnounced = true;
@@ -262,13 +268,17 @@ async function launchCombat(session, channel) {
       }
     }
 
-    // D) Fin si humains KO
+    //
+    // — D) Fin si tous les humains KO —
+    //
     const aliveHumans = [...session.combatants.values()].filter(c => c.ownerId && c.alive);
-    if (!aliveHumans.length) {
+    if (aliveHumans.length === 0) {
       return channel.send('❌ GAME OVER – tous les joueurs sont morts.');
     }
 
-    // E) Fin si un seul survivant
+    //
+    // — E) Fin si un seul survivant —
+    //
     const aliveAll = [...session.combatants.values()].filter(c => c.alive);
     if (aliveAll.length === 1) {
       return channel.send(`🏆 **${aliveAll[0].name}** est le dernier survivant !`);
@@ -277,9 +287,11 @@ async function launchCombat(session, channel) {
     session.turn++;
   }
 
-  // 5) Fin par limite de tours
+  //
+  // — 5) Limite de tours atteinte —
+  //
   const alive = [...session.combatants.values()].filter(c => c.alive && c.ownerId);
-  const winner = alive.sort((a, b) => b.hp - a.hp)[0];
+  const winner = alive.sort((a,b) => b.hp - a.hp)[0];
   return channel.send(`⏱️ Limite atteinte. **${winner.name}** gagne avec ${winner.hp} HP !`);
 }
 
